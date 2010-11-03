@@ -1,0 +1,5 @@
+name = Regenerate
+description = "Enables node regeneration by type."
+package = CCK
+core = "6.x"
+version = "6.x-1.0-alpha1"

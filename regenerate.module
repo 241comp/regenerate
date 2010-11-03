@@ -1,0 +1,208 @@
+<?php
+/** 
+ * Content Type Regenerate Module
+ * V 0.2 - USE AT OWN RISK
+ * Intended to update page types subsequent to creating or changing cck computed fields
+ * Provided with no warranties, guarantees, support, or documentation
+ * Originally written by Ted Tieken of blooksllc.com for unitedforonecause.org
+ 
+ * Reworked and expanded a bit by Martin Joergensen - vertikal.dk
+ * Reworked and expanded again by Peter Drake - ashland.edu
+
+ * Install and activate module - sites/all/modules or sites/all/modules/cck/modules are good choices
+ * Allow other users than admin to regenerate by granting access to 'administer regeneration'
+ * Find the new function in the admin/settings menu
+ * Disable pathauto if in use and you are handling a large number of nodes (thousands)
+ * Select and update the appropriate content type(s)
+ * Reenable pathauto if you disabled it
+
+ * You may encounter timeouts on large batches - for now the only way out is set_time_limit() or php.ini
+ * Splitting the node types into smaller batches or ajaxing the process might be a cure - some time in the future...
+
+ */
+ 
+function regenerate_settings() {
+	drupal_set_title(t('Regenerate Cron Settings'));
+	
+	$form['nodetypes'] = array(
+		'#type' => 'fieldset',
+		'#title' => 'Content Types',
+		'#description' => 'Enter the interval (in minutes) for automatically regenerating each node type.'
+	);
+	
+	$intervals = array(0 => 'Never', 5 => '5 Minutes', 10 => '10 Minutes', 15 => '15 Minutes', 30 => '30 Minutes', 60 => '1 Hour', 120 => '2 Hours', 240 => '4 Hours', 1440 => '1 Day', 10080 => '7 Days', 43200 => '30 Days');
+	
+	// Get all node types
+	$types = node_get_types();
+
+	// Generate the options
+	foreach ($types as $k => $v) {
+		$form_values[$k] = $v->name.' ('.$k.' - '.$num[$k].')';
+		$form['nodetypes'][$k.'_nodes'] = array(
+	    	'#type' => 'select',
+	    	'#title' => t($v->name),
+	    	'#default_value' => variable_get($k.'_nodes', '0'),
+	    	'#options' => $intervals,
+	  	);
+	}
+	return system_settings_form($form);
+}
+
+function regenerate_cron() {
+	
+	$types = node_get_types();
+	$timestamps = variable_get('regenerate_timestamps', array());
+	
+	foreach($types as $k => $v) {
+	  $interval = variable_get($k.'_nodes', '0');
+	  if ($interval && (time() - $timestamps[$k]) > ($interval * 60)) {
+	  	$timestamps[$k] = time();
+	    regenerate_nodes_of_type($k);
+	  }
+	}
+	
+	variable_set('regenerate_timestamps', $timestamps);
+	
+	return true;
+}
+
+/**
+* Implementation of hook_action_info().
+*/
+function regenerate_action_info() {
+  return array(
+    'regenerate_node_action' => array(
+      'description' => t('Regenerate node'),
+      'type' => 'node',
+      'configurable' => FALSE,
+      'hooks' => array(
+        'nodeapi' => array('presave', 'insert', 'update', 'view'),
+        'comment' => array('view', 'insert', 'update', 'delete'),
+        ),
+      ),
+  );
+}
+
+
+// Perform the node regenerate action
+function regenerate_node_action(&$object, $context = array()) {
+  if (isset($object->nid) && !empty($object->nid)) {
+    regenerate_node($object->nid);
+  }
+}
+
+
+// Implement hook_perm
+function regenerate_perm() {
+  return array('administer regeneration', 'administer regeneration cron');
+}
+
+
+// Create menu item
+function regenerate_menu() {
+  $items = array();
+  $items['admin/settings/regenerate'] = array(
+      'title' => t('Regenerate Node Types'),
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('regenerate_node_type'),
+      'description' => t('Regenerate node types'),
+      'type' => MENU_NORMAL_ITEM,
+      'access arguments' => array('administer regeneration'),
+  );
+  $items['admin/settings/regenerate/cron'] = array(
+    'title' => t('Cron'),
+    'description' => t('Regenerate node types via cron.'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('regenerate_settings'),
+	'access callback' => 'user_access',
+    'access arguments' => array('administer regeneration cron'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
+}
+
+
+// Create form
+function regenerate_node_type() {
+  // Get all node types
+  $type = node_get_types();
+
+  // Count nodes of each
+  $res=db_query('SELECT COUNT(*) AS n, type FROM {node} GROUP BY type');
+  while ($data=db_fetch_object($res)) {
+    $num[$data->type]=$data->n;
+  }
+
+  // Generate the options
+  foreach ($type as $k => $v) {
+    $form_values[$k] = $v->name.' ('.$k.' - '.$num[$k].')';
+  }
+
+  // Check for pathauto and create warning
+  if (module_exists('pathauto')) {
+    $warning=t('If you have the pathauto-module enabled, you may want to disable it in the <a href="!url">module list</a> to avoid timeouts when mass-updating. Reactivate it after the regeneration has finished.', array('!url'=>'/admin/build/modules#edit-status-pathauto?destination='.urlencode('/admin/settings/regenerate')));
+  } else {
+    $warning=t('Pathauto not enabled');
+  }
+
+  // Select content type
+  $form['type'] = array(
+    '#type'           => 'select',
+    '#title'          => t('Content type to update'),
+    '#options'        => $form_values,
+    '#description' => theme_item_list(array($warning, t('Select the content type you would like to regenerate.'))),
+    );
+
+  // Submit handler
+  $form['#submit'] = array (
+    'regenerate_node_type_sumbit',
+  ); 
+
+  // Buttons
+  $form['save']=array(
+    '#type' => 'submit',
+    '#value' => t('Regenerate'),
+    );
+
+  $form['cancel']=array(
+    '#type' => 'markup',
+    '#value' => l(t('Cancel'), 'admin/settings') ,
+    );
+
+  return $form;
+}
+
+
+// Processes the submitted form
+function regenerate_node_type_sumbit($form, &$form_state) {
+  regenerate_nodes_of_type($form_state['values']['type']);
+}
+
+
+// Regenerate all nodes of a particular type
+function regenerate_nodes_of_type($type) {
+  $i = 0;
+  $res = db_query("SELECT n.nid FROM {node} n WHERE n.type = '".db_escape_string($type)."'");
+  while ($n = db_fetch_object($res)) {
+    regenerate_node($n->nid);
+    $i++;
+  }
+  
+  drupal_set_message(t("!num nodes of !type updated", array('!num'=>$i, '!type'=>$type)));
+}
+
+
+// Do the actual regeneration by simply loading and saving the nodes
+function regenerate_node($nid) {
+  $node = node_load($nid);
+  $fields = content_fields();
+  //$fields = $fields[$node->type];
+  foreach($fields as $name => $field) {
+  	if ($field['type_name'] == $node->type && $field['type'] == 'computed') {
+  	  //drupal_set_message($node->type.print_r($field, true));
+  	  module_invoke('computed_field', 'field', 'update', $node, content_fields($field['field_name']), $node->$field['field_name'], NULL, NULL);
+  	}
+  }
+  
+  return($n = node_save($node));
+}
